@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea,
                             QGridLayout, QSpacerItem, QSizePolicy, QLineEdit, QStackedWidget,
                             QDialog, QComboBox, QSpinBox, QTextEdit, QTimeEdit, QMessageBox)
-from PyQt6.QtCore import Qt, QSize, QFileSystemWatcher, QTime
+from PyQt6.QtCore import Qt, QSize, QFileSystemWatcher, QTime, QTimer, QUrl
+from PyQt6.QtMultimedia import QSoundEffect
 from PyQt6.QtGui import QFont, QPalette, QColor, QPainter, QPen, QLinearGradient
 from datetime import datetime
 import os
@@ -11,16 +12,25 @@ import json
 
 class MedicineManager:
     def __init__(self):
-        self.data_file = "medicines.json"
+        # Gunakan path absolut untuk file data
+        self.data_dir = os.path.dirname(os.path.abspath(__file__))
+        self.data_file = os.path.join(self.data_dir, "medicines.json")
         self.medicines = self.load_medicines()
+        print(f"Loaded {len(self.medicines)} medicines from {self.data_file}")
     
     def load_medicines(self):
         """Load medicines from JSON file"""
         try:
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return []
+                    data = json.load(f)
+                    # Pastikan data adalah list
+                    if isinstance(data, list):
+                        return data
+                    return []
+            else:
+                print(f"Data file not found: {self.data_file}")
+                return []
         except Exception as e:
             print(f"Error loading medicines: {e}")
             return []
@@ -28,8 +38,13 @@ class MedicineManager:
     def save_medicines(self):
         """Save medicines to JSON file"""
         try:
+            # Pastikan direktori ada
+            os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
+            
             with open(self.data_file, 'w', encoding='utf-8') as f:
                 json.dump(self.medicines, f, ensure_ascii=False, indent=2)
+            
+            print(f"Saved {len(self.medicines)} medicines to {self.data_file}")
             return True
         except Exception as e:
             print(f"Error saving medicines: {e}")
@@ -37,12 +52,58 @@ class MedicineManager:
     
     def add_medicine(self, medicine_data):
         """Add new medicine"""
-        try:
-            self.medicines.append(medicine_data)
-            return self.save_medicines()
-        except Exception as e:
-            print(f"Error adding medicine: {e}")
-            return False
+        # Generate unique ID if not exists
+        if 'id' not in medicine_data:
+            # Find highest existing ID
+            max_id = 0
+            for med in self.medicines:
+                if 'id' in med and med['id'] > max_id:
+                    max_id = med['id']
+            medicine_data['id'] = max_id + 1
+        
+        # Add timestamps
+        medicine_data['created_at'] = datetime.now().isoformat()
+        
+        self.medicines.append(medicine_data)
+        success = self.save_medicines()
+        
+        print(f"Medicine saved: {medicine_data}")
+        return success
+    
+    def edit_medicine(self, medicine_id, updated_data):
+        """Update existing medicine by ID"""
+        for i, medicine in enumerate(self.medicines):
+            if medicine.get('id') == medicine_id:
+                # Preserve some fields from original entry
+                updated_data['id'] = medicine_id
+                updated_data['created_at'] = medicine.get('created_at')
+                updated_data['updated_at'] = datetime.now().isoformat()
+                
+                # Update the medicine
+                self.medicines[i] = updated_data
+                print(f"Medicine updated: {updated_data}")
+                return self.save_medicines()
+                
+        print(f"Medicine with ID {medicine_id} not found for update")
+        return False
+    
+    def delete_medicine(self, medicine_id):
+        """Delete medicine by ID"""
+        for i, medicine in enumerate(self.medicines):
+            if medicine.get('id') == medicine_id:
+                deleted = self.medicines.pop(i)
+                print(f"Medicine deleted: {deleted}")
+                return self.save_medicines()
+                
+        print(f"Medicine with ID {medicine_id} not found for deletion")
+        return False
+    
+    def get_medicine_by_id(self, medicine_id):
+        """Get medicine data by ID"""
+        for medicine in self.medicines:
+            if medicine.get('id') == medicine_id:
+                return medicine
+        return None
     
     def get_medicines_count(self):
         """Get total number of medicines"""
@@ -332,8 +393,61 @@ class MediMateApp(QMainWindow):
         self.create_medicine_list(self.medicine_list_page)
         self.stacked_widget.addWidget(self.medicine_list_page)
         
+        # Buat halaman Jadwal Hari Ini
+        self.today_schedule_page = QWidget()
+        self.create_today_schedule_page(self.today_schedule_page)
+        self.stacked_widget.addWidget(self.today_schedule_page)
+        
         # Tambahkan content container ke main layout
         main_layout.addWidget(self.content_container)
+        
+        # Alarm system
+        self.active_alarms = set()
+        self.sound_effect = QSoundEffect()
+        self.sound_effect.setSource(QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), "alarm.mp3")))
+        self.sound_effect.setLoopCount(-2)  # -2 artinya infinite loop
+        self.sound_effect.setVolume(0.7)
+        self.alarm_timer = QTimer(self)
+        self.alarm_timer.timeout.connect(self.check_alarm_schedule)
+        self.alarm_timer.start(1000 * 30)  # cek setiap 30 detik
+    
+    def check_alarm_schedule(self):
+        now = datetime.now().strftime("%H:%M")
+        today_schedule = self.medicine_manager.get_today_schedule()
+        for item in today_schedule:
+            key = f"{item['time']}|{item['medicine']}"
+            if item['time'] == now and item['status'] == 'Belum Diminum' and key not in self.active_alarms:
+                self.active_alarms.add(key)
+                self.show_alarm_notification(item, key)
+
+    def show_alarm_notification(self, item, alarm_key):
+        alarm_path = os.path.join(os.path.dirname(__file__), "alarm.wav")
+        if not os.path.exists(alarm_path):
+            print("[WARNING] File alarm.wav tidak ditemukan. Alarm tidak akan berbunyi.")
+        else:
+            self.sound_effect.setSource(QUrl.fromLocalFile(alarm_path))
+            self.sound_effect.play()
+        dlg = AlarmDialog(self, item, lambda: self.stop_alarm(item, alarm_key))
+        dlg.exec()
+
+    def stop_alarm(self, item, alarm_key):
+        self.sound_effect.stop()
+        # Update status di medicines.json
+        for med in self.medicine_manager.medicines:
+            if f"{med['name']} - {med['dose']}" == item['medicine']:
+                # Update semua jadwal pada jam itu jadi Sudah Diminum
+                if 'taken_times' not in med:
+                    med['taken_times'] = []
+                if item['time'] not in med['taken_times']:
+                    med['taken_times'].append(item['time'])
+                # Update status per waktu (opsional, untuk future proof)
+                if 'status_per_time' not in med:
+                    med['status_per_time'] = {}
+                med['status_per_time'][item['time']] = 'Sudah Diminum'
+                break
+        self.medicine_manager.save_medicines()
+        self.active_alarms.discard(alarm_key)
+        self.refresh_pages()
     
     def create_sidebar(self, main_layout):
         # Sidebar
@@ -379,9 +493,7 @@ class MediMateApp(QMainWindow):
         nav_buttons = [
             ("Dashboard", "🏠", self.current_page == "Dashboard"),
             ("Daftar Obat", "💊", self.current_page == "Daftar Obat"),
-            ("Jadwal Hari Ini", "📅", self.current_page == "Jadwal Hari Ini"),
-            ("Riwayat Konsumsi", "📋", self.current_page == "Riwayat Konsumsi"),
-            ("Pengaturan", "⚙️", self.current_page == "Pengaturan")
+            ("Jadwal Hari Ini", "📅", self.current_page == "Jadwal Hari Ini")
         ]
         
         # Store buttons to update active state later
@@ -473,7 +585,6 @@ class MediMateApp(QMainWindow):
         cards_data = [
             (total_medicines, "Total Obat\nAktif", ("#FF6B9D", "#C44569"), "💊"),
             (len(today_schedule), "Jadwal\nHari Ini", ("#4FACFE", "#00F2FE"), "📅"),
-            (85, "Kepatuhan\nMinggu Ini", ("#43E97B", "#38F9D7"), "📊"),
             (low_stock_count, "Obat Hampir\nHabis", ("#FA709A", "#FEE140"), "⚠️")
         ]
         
@@ -735,7 +846,8 @@ class MediMateApp(QMainWindow):
                         background: #E2E8F0;
                     }
                 """)
-                
+                # Tambahkan koneksi tombol edit
+                edit_btn.clicked.connect(lambda checked, med=medicine: self.show_edit_medicine_dialog(med))
                 delete_btn = QPushButton("Hapus")
                 delete_btn.setFont(QFont("Segoe UI", 11))
                 delete_btn.setFixedSize(70, 35)
@@ -750,6 +862,8 @@ class MediMateApp(QMainWindow):
                         background: #FEB2B2;
                     }
                 """)
+                # Tambahkan koneksi tombol hapus
+                delete_btn.clicked.connect(lambda checked, med=medicine: self.delete_medicine_with_confirm(med))
                 
                 action_layout.addWidget(edit_btn)
                 action_layout.addWidget(delete_btn)
@@ -790,11 +904,126 @@ class MediMateApp(QMainWindow):
         content_layout.addWidget(list_frame)
         content_layout.addStretch()
     
+    def create_today_schedule_page(self, page):
+        content_layout = QVBoxLayout(page)
+        content_layout.setContentsMargins(40, 40, 40, 40)
+        content_layout.setSpacing(30)
+
+        # Header
+        header_layout = QHBoxLayout()
+        title_label = QLabel("Jadwal Hari Ini")
+        title_label.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+        title_label.setStyleSheet("color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2D3748, stop:1 #4A5568);")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        content_layout.addLayout(header_layout)
+
+        # Ambil jadwal hari ini
+        today_schedule = self.medicine_manager.get_today_schedule()
+
+        # Frame utama
+        schedule_frame = QFrame()
+        schedule_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 0.9), stop:1 rgba(247, 250, 252, 0.9));
+                border-radius: 20px;
+                border: 1px solid rgba(226, 232, 240, 0.5);
+            }
+        """)
+        schedule_layout = QVBoxLayout(schedule_frame)
+        schedule_layout.setContentsMargins(30, 25, 30, 25)
+        schedule_layout.setSpacing(15)
+
+        # Judul
+        schedule_title = QLabel("📋 Jadwal Obat Hari Ini")
+        schedule_title.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        schedule_title.setStyleSheet("color: #2D3748; margin-bottom: 10px;")
+        schedule_layout.addWidget(schedule_title)
+
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("""
+            border: none;
+            height: 2px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 rgba(102, 126, 234, 0.3), stop:0.5 rgba(118, 75, 162, 0.3), stop:1 rgba(102, 126, 234, 0.3));
+            margin: 10px 0px;
+        """)
+        schedule_layout.addWidget(separator)
+
+        # Daftar jadwal
+        if today_schedule:
+            for item in today_schedule:
+                row = QFrame()
+                row.setStyleSheet("""
+                    QFrame {
+                        background: white;
+                        border-radius: 12px;
+                        border: 1px solid #E2E8F0;
+                        margin-bottom: 10px;
+                    }
+                """)
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(18, 10, 18, 10)
+                row_layout.setSpacing(20)
+                time_label = QLabel(item['time'])
+                time_label.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+                time_label.setStyleSheet("color: #667eea;")
+                med_label = QLabel(item['medicine'])
+                med_label.setFont(QFont("Segoe UI", 14))
+                med_label.setStyleSheet("color: #2D3748;")
+                
+                # Badge status
+                status = 'Sudah Diminum' if self.is_time_taken(item) else item['status']
+                status_badge = QLabel(status)
+                status_badge.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+                if status == 'Belum Diminum':
+                    status_badge.setStyleSheet("""
+                        QLabel {
+                            background: #FFF5F5;
+                            color: #E53E3E;
+                            border: 1.5px solid #FEB2B2;
+                            border-radius: 12px;
+                            padding: 4px 16px;
+                            min-width: 90px;
+                            text-align: center;
+                        }
+                    """)
+                else:
+                    status_badge.setStyleSheet("""
+                        QLabel {
+                            background: #F0FFF4;
+                            color: #38A169;
+                            border: 1.5px solid #68D391;
+                            border-radius: 12px;
+                            padding: 4px 16px;
+                            min-width: 90px;
+                            text-align: center;
+                        }
+                    """)
+                row_layout.addWidget(time_label, 1)
+                row_layout.addWidget(med_label, 4)
+                row_layout.addWidget(status_badge, 2)
+                schedule_layout.addWidget(row)
+        else:
+            no_schedule_label = QLabel("Tidak ada jadwal obat untuk hari ini.")
+            no_schedule_label.setFont(QFont("Segoe UI", 14))
+            no_schedule_label.setStyleSheet("color: #718096; text-align: center; padding: 40px;")
+            no_schedule_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            schedule_layout.addWidget(no_schedule_label)
+
+        content_layout.addWidget(schedule_frame)
+        content_layout.addStretch()
+
     def show_add_medicine_dialog(self):
         dialog = AddMedicineDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             # Get medicine data from dialog
             medicine_data = dialog.get_medicine_data()
+            
+            print(f"Adding medicine to manager: {medicine_data}")
             
             if self.medicine_manager.add_medicine(medicine_data):
                 # Show success message
@@ -805,6 +1034,18 @@ class MediMateApp(QMainWindow):
             else:
                 # Show error message
                 QMessageBox.critical(self, "Error", "Gagal menyimpan obat!")
+    
+    def show_edit_medicine_dialog(self, medicine):
+        dialog = EditMedicineDialog(self, medicine)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            updated_data = dialog.get_medicine_data()
+            updated_data['id'] = medicine.get('id')
+            updated_data['created_at'] = medicine.get('created_at')
+            if self.medicine_manager.edit_medicine(medicine.get('id'), updated_data):
+                QMessageBox.information(self, "Berhasil", "Obat berhasil diupdate!")
+                self.refresh_pages()
+            else:
+                QMessageBox.critical(self, "Error", "Gagal mengupdate obat!")
     
     def refresh_pages(self):
         # Refresh dashboard
@@ -819,11 +1060,19 @@ class MediMateApp(QMainWindow):
         self.create_medicine_list(self.medicine_list_page)
         self.stacked_widget.insertWidget(1, self.medicine_list_page)
         
+        # Refresh today schedule page
+        self.stacked_widget.removeWidget(self.today_schedule_page)
+        self.today_schedule_page = QWidget()
+        self.create_today_schedule_page(self.today_schedule_page)
+        self.stacked_widget.insertWidget(2, self.today_schedule_page)
+        
         # Set current page
         if self.current_page == "Dashboard":
             self.stacked_widget.setCurrentIndex(0)
         elif self.current_page == "Daftar Obat":
             self.stacked_widget.setCurrentIndex(1)
+        elif self.current_page == "Jadwal Hari Ini":
+            self.stacked_widget.setCurrentIndex(2)
     
     def change_page(self, page_name):
         # Update current page
@@ -834,6 +1083,8 @@ class MediMateApp(QMainWindow):
             self.stacked_widget.setCurrentIndex(0)
         elif page_name == "Daftar Obat":
             self.stacked_widget.setCurrentIndex(1)
+        elif page_name == "Jadwal Hari Ini":
+            self.stacked_widget.setCurrentIndex(2)
         # Add more pages as needed
         
         # Update sidebar button states
@@ -876,6 +1127,72 @@ class MediMateApp(QMainWindow):
         print("File changed, restarting...")
         QApplication.quit()
         os.execv(sys.executable, ['python'] + sys.argv)
+
+    def delete_medicine_with_confirm(self, medicine):
+        reply = QMessageBox.question(self, "Konfirmasi Hapus", f"Yakin ingin menghapus obat '{medicine['name']}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.medicine_manager.delete_medicine(medicine.get('id')):
+                QMessageBox.information(self, "Berhasil", "Obat berhasil dihapus!")
+                self.refresh_pages()
+            else:
+                QMessageBox.critical(self, "Error", "Gagal menghapus obat!")
+
+    def is_time_taken(self, item):
+        for med in self.medicine_manager.medicines:
+            if f"{med['name']} - {med['dose']}" == item['medicine']:
+                return 'taken_times' in med and item['time'] in med['taken_times']
+        return False
+
+class AlarmDialog(QDialog):
+    def __init__(self, parent, item, stop_callback):
+        super().__init__(parent)
+        self.setWindowTitle("Alarm Obat!")
+        self.setModal(True)
+        self.setFixedSize(420, 260)
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #f093fb, stop:0.5 #f5576c, stop:1 #4facfe);
+                border-radius: 20px;
+            }
+        """)
+        main = QVBoxLayout(self)
+        main.setContentsMargins(30, 30, 30, 30)
+        main.setSpacing(18)
+        icon = QLabel("⏰")
+        icon.setFont(QFont("Segoe UI Emoji", 48))
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(icon)
+        title = QLabel("Waktunya Minum Obat!")
+        title.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        title.setStyleSheet("color: #2D3748;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(title)
+        info = QLabel(f"{item['medicine']}\nJam: {item['time']}")
+        info.setFont(QFont("Segoe UI", 14))
+        info.setStyleSheet("color: #4A5568;")
+        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(info)
+        btn = QPushButton("Sudah Diminum & Matikan Alarm")
+        btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #43E97B, stop:1 #38F9D7);
+                color: white;
+                border: none;
+                border-radius: 12px;
+                padding: 12px 18px;
+                font-size: 15px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #38D86A, stop:1 #32E5C4);
+            }
+        """)
+        btn.clicked.connect(self.accept)
+        main.addWidget(btn)
+        self.accepted.connect(stop_callback)
 
 class AddMedicineDialog(QDialog):
     def __init__(self, parent=None):
@@ -1132,6 +1449,9 @@ class AddMedicineDialog(QDialog):
         # Get medicine data
         medicine_data = self.get_medicine_data()
         
+        # Print for debugging
+        print(f"Saving medicine: {medicine_data}")
+        
         # Basic validation
         if not medicine_data['name'] or not medicine_data['dose']:
             QMessageBox.warning(self, "Peringatan", "Nama obat dan dosis harus diisi!")
@@ -1166,6 +1486,57 @@ class AddMedicineDialog(QDialog):
                     medicine_data['times'].append(time_edit.time().toString("HH:mm"))
         
         return medicine_data
+
+class EditMedicineDialog(AddMedicineDialog):
+    def __init__(self, parent=None, medicine_data=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Obat")
+        # Ubah judul
+        self.findChild(QLabel).setText("💊 Edit Obat")
+        # Isi field dengan data lama
+        if medicine_data:
+            self.medicine_name.setText(medicine_data.get('name', ''))
+            self.dose.setText(medicine_data.get('dose', ''))
+            self.stock_spinbox.setValue(medicine_data.get('stock', 1))
+            # Set stock_unit
+            stock_unit = self.findChild(QComboBox)
+            idx = stock_unit.findText(medicine_data.get('stock_unit', 'tablet'))
+            if idx >= 0:
+                stock_unit.setCurrentIndex(idx)
+            # Set times
+            # Hapus time input default
+            while self.times_layout.count():
+                layout = self.times_layout.takeAt(0)
+                if layout:
+                    l = layout.layout()
+                    if l:
+                        while l.count():
+                            w = l.takeAt(0).widget()
+                            if w:
+                                w.deleteLater()
+            for t in medicine_data.get('times', []):
+                self.add_time_input()
+                layout = self.times_layout.itemAt(self.times_layout.count()-1).layout()
+                if layout:
+                    time_edit = layout.itemAt(0).widget()
+                    if isinstance(time_edit, QTimeEdit):
+                        h, m = map(int, t.split(":"))
+                        time_edit.setTime(QTime(h, m))
+            self.notes_text.setPlainText(medicine_data.get('notes', ''))
+
+    def save_medicine(self):
+        # Get medicine data
+        medicine_data = self.get_medicine_data()
+        print(f"Saving medicine: {medicine_data}")
+        # Basic validation
+        if not medicine_data['name'] or not medicine_data['dose']:
+            QMessageBox.warning(self, "Peringatan", "Nama obat dan dosis harus diisi!")
+            return
+        if not medicine_data['times']:
+            QMessageBox.warning(self, "Peringatan", "Minimal satu jadwal waktu harus diisi!")
+            return
+        # Tidak perlu set id/created_at di sini, akan diatur di MediMateApp
+        self.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
