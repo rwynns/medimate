@@ -12,7 +12,6 @@ import json
 
 class MedicineManager:
     def __init__(self):
-        # Gunakan path absolut untuk file data
         self.data_dir = os.path.dirname(os.path.abspath(__file__))
         self.data_file = os.path.join(self.data_dir, "medicines.json")
         self.medicines = self.load_medicines()
@@ -24,7 +23,6 @@ class MedicineManager:
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    # Pastikan data adalah list
                     if isinstance(data, list):
                         return data
                     return []
@@ -60,10 +58,14 @@ class MedicineManager:
                 if 'id' in med and med['id'] > max_id:
                     max_id = med['id']
             medicine_data['id'] = max_id + 1
-        
+
+        # Tambahkan field status minum
+        medicine_data['taken_times'] = []  # List waktu yang sudah diminum
+        medicine_data['status_per_time'] = {}  # Dict waktu: status
+
         # Add timestamps
         medicine_data['created_at'] = datetime.now().isoformat()
-        
+
         self.medicines.append(medicine_data)
         success = self.save_medicines()
         
@@ -110,14 +112,16 @@ class MedicineManager:
         return len(self.medicines)
     
     def get_today_schedule(self):
-        """Get today's medicine schedule"""
+        """Get today's medicine schedule with correct status"""
         schedule = []
         for medicine in self.medicines:
+            taken_times = medicine.get('taken_times', [])
             for time in medicine.get('times', []):
+                status = "Sudah Diminum" if time in taken_times else "Belum Diminum"
                 schedule.append({
                     'time': time,
                     'medicine': f"{medicine['name']} - {medicine['dose']}",
-                    'status': 'Belum Diminum'  # Default status
+                    'status': status
                 })
         # Sort by time
         schedule.sort(key=lambda x: x['time'])
@@ -404,7 +408,6 @@ class MediMateApp(QMainWindow):
         # Alarm system
         self.active_alarms = set()
         self.sound_effect = QSoundEffect()
-        self.sound_effect.setSource(QUrl.fromLocalFile(os.path.join(os.path.dirname(__file__), "alarm.mp3")))
         self.sound_effect.setLoopCount(-2)  # -2 artinya infinite loop
         self.sound_effect.setVolume(0.7)
         self.alarm_timer = QTimer(self)
@@ -434,17 +437,18 @@ class MediMateApp(QMainWindow):
         self.sound_effect.stop()
         # Update status di medicines.json
         for med in self.medicine_manager.medicines:
-            if f"{med['name']} - {med['dose']}" == item['medicine']:
-                # Update semua jadwal pada jam itu jadi Sudah Diminum
-                if 'taken_times' not in med:
-                    med['taken_times'] = []
-                if item['time'] not in med['taken_times']:
-                    med['taken_times'].append(item['time'])
-                # Update status per waktu (opsional, untuk future proof)
-                if 'status_per_time' not in med:
-                    med['status_per_time'] = {}
-                med['status_per_time'][item['time']] = 'Sudah Diminum'
-                break
+            # Cek nama dan dosis cocok
+            med_name_dose = f"{med['name']} - {med['dose']}"
+            if med_name_dose == item['medicine']:
+                # Tambahkan waktu ke taken_times jika belum ada
+                if item['time'] not in med.get('taken_times', []):
+                    med.setdefault('taken_times', []).append(item['time'])
+                # Kurangi stok sesuai dosis
+                try:
+                    dose = int(''.join(filter(str.isdigit, str(med.get('dose', 1)))))
+                except Exception:
+                    dose = 1
+                med['stock'] = max(0, med.get('stock', 0) - dose)
         self.medicine_manager.save_medicines()
         self.active_alarms.discard(alarm_key)
         self.refresh_pages()
@@ -1147,8 +1151,9 @@ class AlarmDialog(QDialog):
     def __init__(self, parent, item, stop_callback):
         super().__init__(parent)
         self.setWindowTitle("Alarm Obat!")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setModal(True)
-        self.setFixedSize(420, 260)
+        self.setFixedSize(480, 300)  # Perbesar sedikit
         self.setStyleSheet("""
             QDialog {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -1172,8 +1177,10 @@ class AlarmDialog(QDialog):
         info.setFont(QFont("Segoe UI", 14))
         info.setStyleSheet("color: #4A5568;")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info.setWordWrap(True)  # Aktifkan word wrap
+        info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         main.addWidget(info)
-        btn = QPushButton("Sudah Diminum & Matikan Alarm")
+        btn = QPushButton("Sudah Diminum dan Matikan Alarm")
         btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         btn.setStyleSheet("""
             QPushButton {
